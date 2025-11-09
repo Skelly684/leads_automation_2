@@ -36,15 +36,8 @@ import base64
 from urllib.parse import urlencode
 import sys
 from fastapi import Query, BackgroundTasks, HTTPException
-from searchleads_client import (
-    preview as sl_preview,
-    start_export as sl_export,
-    get_status as sl_status,
-    download_sheet_csv as sl_download,
-)
 import asyncio, os
 from uuid import uuid4
-from searchleads_client import start_export as sl_export
 # --- Credits (shared-by-domain) ---
 from credits import (
     PRICE_CENTS_PER_MINUTE,
@@ -69,12 +62,6 @@ except Exception:
     _GOOGLE_LIBS_AVAILABLE = False
 
 # ==== Config ====
-# ---- SearchLeads config ----
-SEARCHLEADS_BASE = os.getenv("SEARCHLEADS_BASE", "https://searchleads.ai")
-SEARCHLEADS_API_KEY = _env("SEARCHLEADS_API_KEY")
-if not SEARCHLEADS_API_KEY:
-    print("!!! WARNING: SEARCHLEADS_API_KEY not set; SearchLeads polling will fail.")
-
 VOICE_PROVIDER_NAME = os.getenv("VOICE_PROVIDER_NAME", "voice")
 VAPI_API_KEY = os.getenv("VAPI_API_KEY", "")
 VAPI_ASSISTANT_ID = os.getenv("VAPI_ASSISTANT_ID", "")
@@ -181,44 +168,6 @@ def _assert_supabase_ok():
         print("!!! FATAL: Supabase probe failed. Check SUPABASE_URL / SUPABASE_KEY.")
         print("Error:", e)
         raise
-
-# ==============================================
-# SearchLeads low-level client helpers
-# ==============================================
-def _sl_headers():
-    return {
-        "Authorization": f"Bearer {SEARCHLEADS_API_KEY}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-
-def _sl_post(path: str, payload: dict, timeout: int = 60):
-    url = f"{SEARCHLEADS_BASE}{path}"
-    r = requests.post(url, headers=_sl_headers(), json=payload, timeout=timeout)
-    try:
-        j = r.json()
-    except Exception:
-        j = {"status": "fail", "message": r.text}
-    if r.status_code >= 300:
-        raise HTTPException(status_code=r.status_code, detail=f"SearchLeads error: {j}")
-    return j
-
-def _sl_get(path: str, params: dict | None = None, timeout: int = 60):
-    url = f"{SEARCHLEADS_BASE}{path}"
-    r = requests.get(url, headers=_sl_headers(), params=params or {}, timeout=timeout)
-    try:
-        j = r.json()
-    except Exception:
-        j = {"status": "fail", "message": r.text}
-    if r.status_code >= 300:
-        raise HTTPException(status_code=r.status_code, detail=f"SearchLeads error: {j}")
-    return j
-
-def _safe_out_path(name: str) -> str:
-    from pathlib import Path as _Path
-    out = _Path.cwd() / "out"
-    out.mkdir(parents=True, exist_ok=True)
-    return str(out / name)
 
 # ==============================================
 # Google Sheet CSV downloader (public/exportable sheets)
@@ -1365,143 +1314,7 @@ def poll_due_email_steps():
 
     except Exception as e:
         print("[EmailSeq] Error:", e)
-# ==============================================
-# Background poller: complete SearchLeads jobs and fetch CSV
-# ==============================================
-def _sl_summarize_csv_bytes(csv_bytes: bytes) -> str:
-    try:
-        txt = csv_bytes.decode("utf-8", errors="ignore")
-        lines = txt.splitlines()
-        if not lines:
-            return "rows=0, cols=0"
-        header = lines[0]
-        cols = [c.strip() for c in header.split(",")]
-        rows = max(0, len(lines) - 1)
-        return f"rows={rows}, cols={len(cols)}"
-    except Exception:
-        return ""
 
-def _update_job(log_id: str, patch: dict):
-    try:
-        patch["updated_at"] = datetime.utcnow().isoformat()
-        supabase.table("searchleads_jobs").update(patch).eq("log_id", log_id).execute()
-    except Exception as e:
-        print("[SearchLeads] job update failed:", e)
-
-import csv
-from io import StringIO
-
-def _sl_summarize_csv_bytes(csv_bytes: bytes) -> str:
-    """
-    Return a tiny, safe summary string for UI/debug: row/col counts and a few headers.
-    Never logs actual data rows to avoid PII in logs.
-    """
-    try:
-        text = csv_bytes.decode("utf-8", errors="ignore")
-        reader = csv.reader(StringIO(text))
-        rows = list(reader)
-        if not rows:
-            return "rows=0; cols=0; headers="
-        headers = rows[0]
-        n_rows = max(0, len(rows) - 1)
-        sample_headers = ", ".join(headers[:6])
-        return f"rows={n_rows}; cols={len(headers)}; headers={sample_headers}"
-    except Exception as e:
-        return f"csv_summary_error:{e}"
-
-def _poll_searchleads_jobs_once(batch: int = 20):
-    try:
-        pending = (supabase.table("searchleads_jobs")
-                   .select("*")
-                   .eq("status", "pending")
-                   .order("created_at", desc=False)
-                   .limit(batch)
-                   .execute()).data or []
-    except Exception as e:
-        print("[SearchLeads] load pending jobs failed:", e)
-        return
-
-    for job in pending:
-        log_id = job.get("log_id")
-        if not log_id:
-            continue
-        try:
-            # Per docs: /api/checkexportstatus?log_id=<uuid>
-            status_res = _sl_get("/api/checkexportstatus", params={"log_id": log_id})
-            log_obj = (status_res.get("log") or {}) if isinstance(status_res, dict) else {}
-            status = str(log_obj.get("status") or "").strip().lower()
-            url = (log_obj.get("url") or "").strip() or None
-
-            if status in ("completed", "complete", "success", "done", "finished"):
-                patch = {"status": "completed", "url": url or job.get("url")}
-                csv_saved = False
-
-                try:
-                    # Prefer authenticated API download (no public sharing needed)
-                    csv_bytes = None
-                    if url:
-                        try:
-                            # sl_download is async and returns (bytes_or_none, err_or_none)
-                            csv_bytes, _err = asyncio.run(sl_download(url))
-                        except Exception:
-                            csv_bytes = None
-
-                    if not csv_bytes and url and url != "url":
-                        # Fallback to public Google Sheet export (requires sharing/publish-to-web)
-                        got = _download_csv_from_sheet(url)
-                        if got:
-                            csv_bytes, used_gid = got
-
-                    if csv_bytes:
-                        # Upload to Supabase Storage -> public URL for frontend
-                        bucket = os.getenv("EXPORTS_BUCKET", "exports")
-                        file_name = job.get("file_name") or "export"
-                        key = f"searchleads/{log_id}/{file_name}.csv"
-
-                        try:
-                            supabase.storage.from_(bucket).upload(
-                                path=key,
-                                file=csv_bytes,
-                                file_options={"content-type": "text/csv", "upsert": True},
-                            )
-                        except Exception as up_e:
-                            # If the client wants a file-like object, fallback to local then upload
-                            tmp_path = _safe_out_path(f"export-{file_name}-{log_id}.csv")
-                            with open(tmp_path, "wb") as f:
-                                f.write(csv_bytes)
-                            supabase.storage.from_(bucket).upload(
-                                path=key,
-                                file=open(tmp_path, "rb"),
-                                file_options={"content-type": "text/csv", "upsert": True},
-                            )
-
-                        public_url = supabase.storage.from_(bucket).get_public_url(key)
-                        patch["csv_path"] = public_url
-                        patch["summary"] = _sl_summarize_csv_bytes(csv_bytes)
-                        csv_saved = True
-
-                    _update_job(log_id, patch)
-
-                    if not csv_saved and url:
-                        print(f"[SearchLeads] Completed but CSV not accessible (make sheet public or ensure API download works). log_id={log_id}")
-                except Exception as e:
-                    print(f"[SearchLeads] CSV finalize error ({log_id}):", e)
-
-            elif status in ("failed", "error"):
-                _update_job(log_id, {"status": "failed", "error": "SearchLeads job failed", "url": url})
-
-            else:
-                # still pending; nothing to do
-                pass
-
-        except HTTPException as http_e:
-            print(f"[SearchLeads] poll error ({log_id}):", http_e.detail)
-        except Exception as e:
-            print(f"[SearchLeads] poll error ({log_id}):", e)
-
-def poll_searchleads_jobs():
-    """Scheduled every 2 minutes; cheap + idempotent."""
-    _poll_searchleads_jobs_once(batch=30)
 def norm_ws(s): 
     return re.sub(r"\s+", " ", s.strip())
 
@@ -1674,105 +1487,6 @@ def nl_to_actor_input(prompt: str, total_results: int):
     # remove empties
     return {k: v for k, v in payload.items() if v not in (None, [], "")}
 
-# ===========================
-# SearchLeads: kickoff export
-# ===========================
-@app.post("/api/searchleads/export")
-async def api_searchleads_export(request: Request):
-    """
-    Kick off a paid SearchLeads export and record a pending job row so the poller can complete it later.
-    Body: {
-      "filter": {...},         # SearchLeads filter object
-      "noOfLeads": 500,        # how many to pull
-      "fileName": "finance_usa_oct"  # any label you want
-    }
-    Returns: { ok: True, log_id: "...", file_name: "..." }
-    """
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"ok": False, "error": "JSON body required"}, status_code=400)
-
-    filter_obj = body.get("filter") or {}
-    num = int(body.get("noOfLeads") or body.get("count") or 0)
-    file_name = (body.get("fileName") or body.get("name") or f"export-{uuid4().hex[:8]}").strip()
-
-    if not isinstance(filter_obj, dict) or not num:
-        return JSONResponse({"ok": False, "error": "Missing filter or noOfLeads"}, status_code=400)
-
-    # Start the export on SearchLeads -> returns a log_id
-    try:
-        log_id = await sl_export(filter_obj, num, file_name)
-        if not log_id:
-            return JSONResponse({"ok": False, "error": "SearchLeads did not return log_id"}, status_code=502)
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": f"SearchLeads export error: {e}"}, status_code=502)
-
-    # Insert a pending job row so the poller can finish it later
-    try:
-        supabase.table("searchleads_jobs").insert({
-            "log_id": log_id,
-            "status": "pending",
-            "file_name": file_name,
-            "url": None,
-            "csv_path": None,
-            "summary": None,
-        }).execute()
-    except Exception as e:
-        # We still return ok because the export already started, but warn in logs
-        print("[SearchLeads] WARNING: failed to insert pending job row:", e)
-
-    return {"ok": True, "log_id": log_id, "file_name": file_name}
-
-# ===========================
-# SearchLeads: list jobs
-# ===========================
-# === SearchLeads: start paid export (frontend calls this) ===
-@app.post("/api/searchleads/export")
-async def api_searchleads_export(request: Request):
-    user_id = _get_request_user_id(request)
-    if not user_id:
-        return JSONResponse({"ok": False, "error": "Missing user_id (X-User-Id)"}, status_code=400)
-
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"ok": False, "error": "JSON body required"}, status_code=400)
-
-    # Accept both snake_case and camelCase from the frontend
-    filter_obj  = body.get("filter") or {}
-    no_of_leads = int(body.get("no_of_leads") or body.get("noOfLeads") or 100)
-    file_name   = (body.get("file_name") or body.get("fileName") or f"export-{uuid4().hex[:8]}").strip()
-
-    if not isinstance(filter_obj, dict):
-        return JSONResponse({"ok": False, "error": "filter must be an object"}, status_code=400)
-
-    # Kick off the export with the async client
-    try:
-        log_id = await sl_export(filter_obj, no_of_leads, file_name)  # <-- await is REQUIRED
-    except Exception as e:
-        # Bubble up a clean error; 502 signals upstream failure
-        return JSONResponse({"ok": False, "error": f"SearchLeads export error: {e}"}, status_code=502)
-
-    # Record the job in Supabase so the poller can finish it and attach csv_url later
-    try:
-        supabase.table("searchleads_jobs").insert({
-            "log_id": log_id,
-            "status": "pending",
-            "file_name": file_name,
-            "url": None,
-            "csv_path": None,     # column name in your DB
-            "csv_url": None,      # safe to keep; your GET normalizes csv_path->csv_url
-            "summary": None,
-            "user_id": user_id,
-            "created_at": datetime.utcnow().isoformat()
-        }).execute()
-    except Exception as e:
-        # If we fail to write the row, still return the log_id so you don’t lose the job
-        print("[SearchLeads] insert job row failed:", e)
-
-    return {"ok": True, "log_id": log_id, "file_name": file_name, "status": "pending"}
-# ===================================================
 # REST: scrape (NL → Apify actor via working translator)
 # ===================================================
 @app.post("/api/scrape-leads")
@@ -2285,63 +1999,6 @@ def get_lead(lead_id: str):
         print("Lead fetch failed:", e)
         return JSONResponse({"ok": False, "error": "Lead not found"}, status_code=404)
 
-# ===================================================
-# SearchLeads: list completed exports for dashboard
-# ===================================================
-@app.get("/api/searchleads/jobs")
-def list_searchleads_jobs(
-    status: str = "completed",
-    limit: int = 50,
-    page: int = 1,
-):
-    """
-    Returns paginated SearchLeads export jobs for the dashboard.
-    Frontend can call:
-      GET /api/searchleads/jobs?status=completed&limit=50&page=1
-
-    Response items include:
-      - id / log_id
-      - file_name
-      - status
-      - csv_url  (public Supabase Storage URL)
-      - summary  (rows/cols headers summary)
-      - created_at / updated_at
-    """
-    try:
-        limit = max(1, min(200, int(limit)))
-        page = max(1, int(page))
-        off = (page - 1) * limit
-
-        # Filter by status if provided (usually 'completed')
-        q = supabase.table("searchleads_jobs").select("*")
-        if status:
-            q = q.eq("status", status)
-
-        # newest first
-        q = q.order("created_at", desc=True)
-
-        # simple pagination
-        rows = (q.range(off, off + limit - 1).execute()).data or []
-
-        # Normalize keys the UI cares about
-        items = []
-        for r in rows:
-            items.append({
-                "id": r.get("id"),
-                "log_id": r.get("log_id"),
-                "file_name": r.get("file_name"),
-                "status": r.get("status"),
-                "csv_url": r.get("csv_url"),
-                "summary": r.get("summary"),
-                "url": r.get("url"),
-                "created_at": r.get("created_at"),
-                "updated_at": r.get("updated_at"),
-            })
-
-        return {"ok": True, "items": items, "page": page, "limit": limit}
-    except Exception as e:
-        print("[SearchLeads] list jobs error:", e)
-        return JSONResponse({"ok": False, "error": "list_failed"}, status_code=500)
 
 # ===================================================
 # Inbound Email Webhook (generic) — logs replies & marks contacted
@@ -2856,16 +2513,6 @@ def on_startup():
     except SchedulerAlreadyRunningError:
         print("[Scheduler] Already running; refreshing jobs")
         _schedule_jobs()
-        # SearchLeads job poller
-    scheduler.add_job(
-        poll_searchleads_jobs,
-        trigger="interval", minutes=2,
-        id="searchleads-poller",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-    )
-    print("[Scheduler] SearchLeads poller scheduled (every 2m)")
 
 @app.post("/vapi/webhook")
 async def vapi_webhook(request: Request):
@@ -3332,66 +2979,6 @@ async def create_event_alias(request: Request):
         event["attendees"] = [{"email": e} if isinstance(e, str) else e for e in body["attendees"]]
     created = _calendar_create_event(user_id, event)
     return {"ok": True, "event": created}
-
-# ===================================================
-# REST: list SearchLeads export jobs (for Lovable UI)
-# ===================================================
-from fastapi import Query
-
-@app.get("/api/searchleads/jobs")
-@app.get("/searchleads/jobs")  # alias without /api because Lovable is calling this
-def list_searchleads_jobs(
-    request: Request,
-    status: Optional[str] = Query(None, description="pending|completed|failed"),
-    limit: int = Query(50, ge=1, le=200),
-    page: int = Query(1, ge=1),
-):
-    """
-    Returns paginated SearchLeads jobs for the current user (if you scope by user),
-    or all jobs if you aren't storing per-user ownership.
-
-    Response shape expected by Lovable:
-      { "ok": true, "items": [{ file_name, status, summary, csv_url, created_at, log_id }], "total": N }
-    """
-    try:
-        # If you want to scope by user, uncomment the next two lines and add .eq("user_id", user_id) to the query.
-        # user_id = _get_request_user_id(request)
-        # if not user_id: return JSONResponse({"ok": False, "error": "Missing user_id"}, status_code=400)
-
-        # Build base query
-        sel = "log_id,status,file_name,csv_path,summary,url,created_at"
-        q = supabase.table("searchleads_jobs").select(sel, count="exact")
-
-        if status:
-            q = q.eq("status", status.lower())
-
-        # Sort newest first and paginate using range()
-        limit = max(1, min(200, int(limit)))
-        page = max(1, int(page))
-        start = (page - 1) * limit
-        end = start + limit - 1
-
-        q = q.order("created_at", desc=True).range(start, end)
-        res = q.execute()
-        items = getattr(res, "data", []) or []
-        total = getattr(res, "count", None)
-
-        # Normalize fields Lovable reads
-        normalized = []
-        for r in items:
-            normalized.append({
-                "log_id": r.get("log_id"),
-                "file_name": r.get("file_name") or "export",
-                "status": (r.get("status") or "").lower(),
-                "summary": r.get("summary") or "",
-                "csv_url": r.get("csv_path") or None,
-                "created_at": r.get("created_at"),
-            })
-
-        return {"ok": True, "items": normalized, "total": total}
-    except Exception as e:
-        print("[/searchleads/jobs] error:", e)
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 # ===================================================
 # ADMIN-ONLY USER MANAGEMENT (self-contained block)

@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+supabase
+pytz
+phonenumbers
+apscheduler
+google-auth-oauthlib
+google-api-python-client
+apify-client==1.7.1
+apify-client
+python-dotenv

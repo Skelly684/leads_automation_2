@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+supabase
+pytz
+phonenumbers
+apscheduler
+google-auth-oauthlib
+google-api-python-client

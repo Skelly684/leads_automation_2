@@ -1,0 +1,40 @@
+app = "psn-backend"
+
+primary_region = "lhr" # or nearest to you/users
+
+[build]
+  # Uses your Dockerfile automatically
+
+[env]
+  PORT = "8080"
+  UVICORN_WORKERS = "2"   # optional: your Dockerfile CMD already sets workers via gunicorn/uvicorn
+
+[[services]]
+  internal_port = 8080
+  processes = ["app"]
+  protocol = "tcp"
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  [services.concurrency]
+    type = "requests"
+    soft_limit = 50
+    hard_limit = 100
+
+  [[services.http_checks]]
+    interval = "10s"
+    timeout  = "2s"
+    grace_period = "30s"
+    method = "GET"
+    path   = "/api/health"
+
+[vm]
+  memory = 1024
+  cpu_kind = "shared"
+  cpus = 1

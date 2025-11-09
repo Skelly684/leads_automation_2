@@ -1524,11 +1524,18 @@ async def accept_and_call_leads(request: Request, background_tasks: BackgroundTa
       - or an object: { "leads": [...], "emailTemplateId": "uuid-optional", "campaignId": "..." }
     Stamps campaign_id onto every lead and runs call/email flows.
     """
-    user_id = _get_request_user_id(request)
+    # Read JSON first so we can accept user_id from the body too
+    body = await request.json()
+
+    # Accept user_id from header, query, OR body (user_id / userId)
+    user_id = (
+        _get_request_user_id(request)
+        or (body.get("user_id") if isinstance(body, dict) else None)
+        or (body.get("userId") if isinstance(body, dict) else None)
+    )
     if not user_id:
         return JSONResponse({"ok": False, "error": "Missing user_id"}, status_code=400)
 
-    body = await request.json()
     try:
         # One-time raw log to prove what the UI actually sent
         print(f"[ACCEPT][RAW BODY] {json.dumps(body)[:2000]}")

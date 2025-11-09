@@ -1,140 +1,105 @@
-# credits.py
-import os
-from typing import Optional, Dict, Any
+import phonenumbers
+from phonenumbers import timezone as ph_timezone
+from datetime import datetime
+import pytz
+import requests
+import time
+from supabase import create_client, Client
 
-# Pricing (env overrides supported)
-PRICE_CENTS_PER_MINUTE = int(os.getenv("PRICE_CENTS_PER_MINUTE", "30"))  # $0.30/min
-MIN_RESERVE_CENTS = int(os.getenv("MIN_RESERVE_CENTS", "30"))            # require ≥ 1 min to start a call
+# ---- Credentials/Settings ----
+VAPI_API_KEY = 'd7b7ebcb-156a-44b7-9763-ea90defd5c48'
+VAPI_ASSISTANT_ID = '90dcabfe-0201-4a0e-9325-af9ae40c9352'
+VAPI_PHONE_NUMBER_ID = '88839f31-726a-4e63-8f44-61a30ec8f63d'
+SUPABASE_URL = 'https://qjmzyoxzxjkvrvohksjh.supabase.co'
+SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFqbXp5b3h6eGprdnJ2b2hrc2poIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE1Nzg0MDMsImV4cCI6MjA3NzE1NDQwM30.YwPa9P4rwB9Z3jYcaLVLsM3eepvoTM3wHvlxSJr476U'  # <<<<<<<< FILL THIS IN <<<<<<<<
 
-def email_domain_of(supabase, user_id: Optional[str]) -> Optional[str]:
-    """Resolve a user's email domain for shared balance."""
-    if not user_id:
-        return None
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+CALL_WINDOW_START = 9
+CALL_WINDOW_END = 18
+
+def get_local_hour(phone):
     try:
-        # Try profiles table first (adjust if you store elsewhere)
-        r = supabase.table("profiles").select("email").eq("id", user_id).single().execute()
-        email = (getattr(r, "data", None) or {}).get("email")
-        if not email:
-            # Optional fallback if you mirror auth.users
-            try:
-                r2 = supabase.table("auth_users").select("email").eq("id", user_id).single().execute()
-                email = (getattr(r2, "data", None) or {}).get("email")
-            except Exception:
-                email = None
-        if not email or "@" not in email:
+        number = phonenumbers.parse(str(phone), None)
+        timezones = ph_timezone.time_zones_for_number(number)
+        if not timezones:
             return None
-        return email.split("@", 1)[1].lower().strip()
-    except Exception:
+        tz = pytz.timezone(timezones[0])
+        now_local = datetime.now(tz)
+        return now_local.hour
+    except Exception as e:
+        print(f"Timezone error for {phone}: {e}")
         return None
 
-def domain_balance(supabase, domain: str) -> int:
+def is_valid_phone(phone):
     try:
-        r = supabase.table("org_credits").select("balance_cents").eq("domain", domain).single().execute()
-        row = getattr(r, "data", None)
-        return int(row.get("balance_cents")) if row else 0
-    except Exception:
-        return 0
-
-def domain_add_credits(supabase, domain: str, amount_cents: int, reason: str = "topup", meta: Dict[str, Any] | None = None) -> int:
-    res = supabase.rpc("add_credits", {
-        "p_domain": domain,
-        "p_amount_cents": amount_cents,
-        "p_reason": reason,
-        "p_meta": meta or {}
-    }).execute()
-    data = getattr(res, "data", []) or [{"new_balance": 0}]
-    return int(data[0]["new_balance"])
-
-def domain_spend_credits(supabase, domain: str, amount_cents: int, reason: str = "call_charge", meta: Dict[str, Any] | None = None) -> int:
-    res = supabase.rpc("spend_credits", {
-        "p_domain": domain,
-        "p_amount_cents": amount_cents,
-        "p_reason": reason,
-        "p_meta": meta or {}
-    }).execute()
-    data = getattr(res, "data", []) or [{"new_balance": 0}]
-    return int(data[0]["new_balance"])
-
-def ensure_credit_before_call(
-    supabase,
-    lead: Dict[str, Any],
-    min_reserve_cents: int,
-    log_call_cb,     # function(lead_id, status, notes)
-    update_lead_cb   # function(lead_id, patch_dict)
-) -> bool:
-    """
-    Return True if there is enough shared domain credit to start a call, else log+mark and return False.
-    """
-    user_id = lead.get("user_id")
-    domain = email_domain_of(supabase, user_id)
-    if not domain:
-        # If we can't resolve a domain, allow the call (or flip this to block)
-        return True
-    bal = domain_balance(supabase, domain)
-    if bal < min_reserve_cents:
-        lead_id = lead.get("id")
-        log_call_cb(lead_id, "blocked", f"insufficient_funds domain={domain} bal_cents={bal}")
-        update_lead_cb(lead_id, {"last_call_status": "blocked_insufficient_credits"})
-        print(f"[CREDITS] Blocked call (insufficient) domain={domain} balance={bal}")
+        number = phonenumbers.parse(str(phone), None)
+        return phonenumbers.is_possible_number(number) and phonenumbers.is_valid_number(number)
+    except:
         return False
-    return True
 
-def bill_call_completion(
-    supabase,
-    lead_id: str,
-    external_call_id: Optional[str],
-    duration_seconds: int,
-    price_cents_per_minute: int = PRICE_CENTS_PER_MINUTE
-) -> None:
-    """
-    Charges the shared domain of the lead's owner for a completed call.
-    Rounds duration up to the next minute (min 1 minute).
-    """
-    # Find the lead's user_id (owner) to resolve domain
-    user_id = None
-    try:
-        lres = supabase.table("leads").select("user_id").eq("id", lead_id).single().execute()
-        user_id = (getattr(lres, "data", None) or {}).get("user_id")
-    except Exception:
-        pass
-
-    domain = email_domain_of(supabase, user_id)
-    if not domain:
-        return
-
-    dur = int(duration_seconds or 0)
-    billed_minutes = max(1, (dur + 59) // 60)
-    cost_cents = billed_minutes * int(price_cents_per_minute)
-
-    if cost_cents <= 0:
-        return
-
-    new_balance = domain_spend_credits(
-        supabase,
-        domain=domain,
-        amount_cents=cost_cents,
-        reason="call_charge",
-        meta={
-            "lead_id": lead_id,
-            "external_call_id": external_call_id,
-            "duration_sec": dur,
-            "billed_minutes": billed_minutes
+def make_vapi_call(phone, lead):
+    url = "https://api.vapi.ai/v1/call/phone"
+    payload = {
+        "assistant": VAPI_ASSISTANT_ID,
+        "phone": {
+            "number": phone,
+            "phoneNumberId": VAPI_PHONE_NUMBER_ID
+        },
+        "metadata": {
+            "lead_name": lead.get("first_name") or lead.get("name") or "",
+            "job_title": lead.get("job_title") or "",
+            "company": lead.get("company_name") or lead.get("company") or "",
         }
-    )
+    }
+    headers = {
+        "Authorization": f"Bearer {VAPI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    resp = requests.post(url, json=payload, headers=headers)
+    print(f"Call to {phone} ({payload['metadata']['lead_name']}): {resp.status_code}, {resp.text}")
+    return resp.status_code, resp.text
 
-    # Optional usage row
-    try:
-        supabase.table("call_usage").insert({
-            "external_call_id": external_call_id,
-            "lead_id": lead_id,
-            "user_id": user_id,
-            "domain": domain,
-            "duration_sec": dur,
-            "billed_minutes": billed_minutes,
-            "cost_cents": cost_cents,
-            "status": "completed",
-        }).execute()
-    except Exception:
-        pass
+def fetch_accepted_leads():
+    resp = supabase.table('leads').select("*").eq('status', 'accepted').execute()
+    return resp.data
 
-    print(f"[CREDITS] Charged {cost_cents}c ({billed_minutes}m) domain={domain} new_balance={new_balance}")
+def update_lead_status(lead_id, status, contact_time=None):
+    update = {'status': status}
+    if contact_time:
+        update['sent_for_contact_at'] = contact_time
+    supabase.table('leads').update(update).eq('id', lead_id).execute()
+
+def log_call(lead_id, call_status, notes=""):
+    # Call duration and notes are optional for now
+    supabase.table('call_logs').insert({
+        'lead_id': lead_id,
+        'call_status': call_status,
+        'notes': notes,
+        # 'call_duration': call_duration  # You can add this if available
+    }).execute()
+
+def call_all_leads():
+    leads = fetch_accepted_leads()
+    for lead in leads:
+        phone = (
+            lead.get("phone") or ""
+        )
+        if not is_valid_phone(phone):
+            print(f"Skipping invalid phone: {phone}")
+            continue
+
+        local_hour = get_local_hour(phone)
+        if local_hour is None or not (CALL_WINDOW_START <= local_hour < CALL_WINDOW_END):
+            print(f"Skipping {phone}: Not in allowed call window ({local_hour})")
+            continue
+
+        status_code, msg = make_vapi_call(phone, lead)
+        now = datetime.utcnow().isoformat()
+        # Log call attempt in call_logs table
+        log_call(lead['id'], f"{status_code}", msg)
+        # Update lead as contacted
+        update_lead_status(lead['id'], 'contacted', contact_time=now)
+        time.sleep(1)  # Respect rate limits
+
+if __name__ == "__main__":
+    call_all_leads()

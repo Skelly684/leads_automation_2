@@ -203,6 +203,45 @@ def _download_csv_from_sheet(sheet_url: str, gid_candidates=(0, 1837663021)) -> 
 # ===================================================
 _CAMPAIGN_RULES_AVAILABLE = True
 
+def _to_hour(val) -> int | None:
+    """
+    Accepts 0..24, "0", "00", "00:00", "00:00:00", "23:59", "24:00", etc.
+    Returns an int hour in [0,24]. Uses <start <= hour < end> semantics.
+    """
+    if val is None:
+        return None
+    # Already an int?
+    if isinstance(val, int):
+        return max(0, min(24, val))
+    # Try string forms
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        # Special-cases that should mean end-of-day
+        if s in ("24", "24:00", "24:00:00"):
+            return 24
+        parts = s.split(":")
+        try:
+            h = int(parts[0])
+        except Exception:
+            return None
+        # If minutes/seconds are present and at 59:59, treat as 24
+        try:
+            m = int(parts[1]) if len(parts) >= 2 else 0
+            sec = int(parts[2]) if len(parts) >= 3 else 0
+        except Exception:
+            m = 0
+            sec = 0
+        if h == 23 and (m >= 59 or sec >= 59):
+            return 24
+        return max(0, min(24, h))
+    # Fallback best-effort
+    try:
+        return max(0, min(24, int(val)))
+    except Exception:
+        return None
+
 def get_campaign_rules(campaign_id: Optional[str]) -> Dict:
     # sane defaults if nothing is set in DB
     rules = {
@@ -284,24 +323,44 @@ def get_campaign_rules(campaign_id: Optional[str]) -> Dict:
         if "use_email" in dr:  rules["send_email"] = bool(dr["use_email"])
         if "use_calls" in dr:  rules["send_calls"] = bool(dr["use_calls"])
 
-        # nested call dict (map to flat)
-        call_dr = dr.get("call") or {}
-        if isinstance(call_dr, dict):
-            if "window_start" in call_dr: rules["call_window_start"] = int(call_dr["window_start"])
-            if "window_end"   in call_dr: rules["call_window_end"]   = int(call_dr["window_end"])
-            if "max_attempts" in call_dr: rules["max_attempts"]      = int(call_dr["max_attempts"])
-            if "retry_minutes" in call_dr: rules["retry_minutes"]    = int(call_dr["retry_minutes"])
-
+        # nested call dict (accept flat or nested)
+        call_dr = dr.get("call") if isinstance(dr.get("call"), dict) else dr
+        
+        # read raw values (can be "00:00:00" etc.)
+        start_raw = call_dr.get("window_start", rules["call_window_start"])
+        end_raw   = call_dr.get("window_end",   rules["call_window_end"])
+        
+        # parse safely
+        start = _to_hour(start_raw)
+        end   = _to_hour(end_raw)
+        
+        # fallback to defaults if parsing failed
+        if start is None:
+            start = rules["call_window_start"]
+        if end is None:
+            end = rules["call_window_end"]
+        
+        # normalize: we use start <= hour < end; map end=23 (or 23:59:59) to 24
+        if end == 23:
+            end = 24
+        
+        # clamp to valid range
+        start = max(0, min(23, start))
+        end   = max(1, min(24, end))
+        
+        rules["call_window_start"] = start
+        rules["call_window_end"]   = end
+        
+        # other call knobs
+        if "max_attempts" in call_dr:
+            rules["max_attempts"] = int(call_dr["max_attempts"])
+        if "retry_minutes" in call_dr:
+            rules["retry_minutes"] = int(call_dr["retry_minutes"])
+        
         # nested email dict
         email_dr = dr.get("email") or {}
-        if isinstance(email_dr, dict):
-            if "send_initial" in email_dr:
-                rules["email"]["send_initial"] = bool(email_dr["send_initial"])
-    except Exception:
-        _CAMPAIGN_RULES_AVAILABLE = False
-        print("Campaign rules lookup disabled (missing column/table). Using defaults.")
-
-    return rules
+        if isinstance(email_dr, dict) and "send_initial" in email_dr:
+            rules["email"]["send_initial"] = bool(email_dr["send_initial"])
 
 # ===================================================
 # Helpers: phone/timezone (for calls)

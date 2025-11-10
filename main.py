@@ -3150,30 +3150,34 @@ def get_credits(request: Request):
     uid = _get_request_user_id(request)
     domain = email_domain_of(supabase, uid)
     if not domain:
-        return {"ok": True, "domain": None, "balance_cents": 0}
-    return {"ok": True, "domain": domain, "balance_cents": domain_balance(supabase, domain)}
+        return {"ok": True, "domain": None, "balance_credits": 0}
+    # domain_balance(...) should now return credits (not cents) via credits.py wrapper
+    return {"ok": True, "domain": domain, "balance_credits": domain_balance(supabase, domain)}
 
 @app.post("/api/credits/topup")
 async def post_topup(request: Request):
     """
-    Call this after a successful payment.
-    Body: { "amount_cents": 5000 }  # $50.00
+    Add credits (INTEGER) to the domain. Aligns with Lovable’s contract.
     """
     uid = _get_request_user_id(request)
-    if not uid:
-        raise HTTPException(status_code=400, detail="Missing user_id")
     domain = email_domain_of(supabase, uid)
     if not domain:
         raise HTTPException(status_code=400, detail="Cannot resolve email domain for user")
 
     body = await request.json()
-    amount_cents_raw = body.get("amount_cents")
+    amount_raw = body.get("amount_credits")
     try:
-        amount_cents = int(amount_cents_raw)
+        amount_credits = int(amount_raw)
     except Exception:
-        amount_cents = 0
-    if amount_cents <= 0:
-        raise HTTPException(status_code=400, detail="amount_cents must be > 0")
+        amount_credits = 0
+    if amount_credits <= 0:
+        raise HTTPException(status_code=400, detail="amount_credits must be > 0")
 
-    new_balance = domain_add_credits(supabase, domain, amount_cents, reason="topup", meta={"user_id": uid})
-    return {"ok": True, "domain": domain, "balance_cents": new_balance}
+    new_balance = domain_add_credits(
+        supabase,
+        domain,
+        amount_credits,
+        reason="topup",
+        meta={"user_id": uid}
+    )
+    return {"ok": True, "domain": domain, "balance_credits": new_balance}

@@ -9,6 +9,11 @@ from typing import Optional, Dict, Any
 PRICE_CENTS_PER_MINUTE = int(os.getenv("PRICE_CENTS_PER_MINUTE", "30"))  # legacy; only used for compatibility math
 MIN_REQUIRED_CREDITS   = int(os.getenv("MIN_REQUIRED_CREDITS", "1"))     # default: must have >=1 credit to start
 
+# Back-compat for main.py: it imports MIN_RESERVE_CENTS.
+# If MIN_RESERVE_CENTS env is set, we honor it; otherwise derive from credits model:
+# required_credits * price_cents_per_minute  (1 credit * 30c = 30 cents)
+MIN_RESERVE_CENTS = int(os.getenv("MIN_RESERVE_CENTS", str(MIN_REQUIRED_CREDITS * PRICE_CENTS_PER_MINUTE)))
+
 # -----------------------------------------------------------------------------
 # Email domain resolver (unchanged)
 # -----------------------------------------------------------------------------
@@ -55,6 +60,7 @@ def domain_balance_credits(supabase, domain: str) -> int:
     except Exception:
         return 0
 
+# Back-compat alias so existing main.py calls keep working.
 def domain_balance(supabase, domain: str) -> int:
     # return balance in CREDITS to keep /api/credits simple
     return domain_balance_credits(supabase, domain)

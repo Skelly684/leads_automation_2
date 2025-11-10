@@ -32,6 +32,12 @@ import sys
 from fastapi import Query, BackgroundTasks, HTTPException
 import asyncio, os
 from uuid import uuid4
+# ---- env helper (add this near the top, after imports) ----
+import os
+
+def _env(key: str, default: str = "") -> str:
+    v = os.getenv(key)
+    return v if v is not None else default
 # --- Credits (shared-by-domain) ---
 from credits import (
     PRICE_CENTS_PER_MINUTE,

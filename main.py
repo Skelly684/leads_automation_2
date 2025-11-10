@@ -1,47 +1,27 @@
 import os
 import re
 import json
+import base64
+import asyncio
 import requests
+import smtplib
+import phonenumbers
 from uuid import uuid4
+from urllib.parse import urlencode
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Tuple, Dict, Any
 
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Body
+from fastapi import FastAPI, APIRouter, Request, BackgroundTasks, HTTPException, Body, Query
 from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.schedulers.base import SchedulerAlreadyRunningError
-import json
 from supabase import create_client, Client
-from datetime import datetime, timedelta, timezone
-import pytz
-import phonenumbers
 from phonenumbers import timezone as ph_timezone
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.schedulers.base import SchedulerAlreadyRunningError
-import re
-import smtplib
-from email.message import EmailMessage
-import os
-from typing import Optional, Tuple, Dict, List
-from uuid import uuid4
-import base64
-from urllib.parse import urlencode
-import sys
-from fastapi import Query, BackgroundTasks, HTTPException
-import asyncio, os
-from uuid import uuid4
-# ---- env helper (add this near the top, after imports) ----
+
 import os
 
-def _env(key: str, default: str = "") -> str:
-    v = os.getenv(key)
-    return v if v is not None else default
-# --- Credits (shared-by-domain) ---
 from credits import (
     PRICE_CENTS_PER_MINUTE,
-    MIN_RESERVE_CENTS,
     email_domain_of,
     domain_balance,
     domain_add_credits,
@@ -49,6 +29,14 @@ from credits import (
     ensure_credit_before_call,
     bill_call_completion,
 )
+
+# ---- env helper
+def _env(key: str, default: str = "") -> str:
+    v = os.getenv(key)
+    return v if v is not None else default
+
+# define after _env, at module level (no indentation)
+MIN_RESERVE_CENTS = int(os.getenv("MIN_RESERVE_CENTS", "30"))
 
 # ---- Google libs ----
 try:
@@ -125,6 +113,21 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
+
+vapi_router = APIRouter()
+VAPI_WEBHOOK_SECRET = os.getenv("VAPI_WEBHOOK_SECRET")  # set in Render
+app.include_router(vapi_router)
+
+def _event_is_final(status: str) -> bool:
+    return status in ("completed", "failed", "no_answer", "busy", "canceled", "hangup")
+
+def _was_answered(status: str, duration_seconds: int | None, answered_flag: bool | None) -> bool:
+    # Count as answered if duration>0 OR answered flag true OR status==completed
+    if answered_flag is True:
+        return True
+    if duration_seconds and duration_seconds > 0:
+        return True
+    return status == "completed"
 
 def _get_request_user_id(req: Request) -> Optional[str]:
     hdr = req.headers.get("X-User-Id")
@@ -725,7 +728,6 @@ def call_lead_if_possible(lead):
     log_call_to_supabase(lead_id, "queued" if status_code in (200, 201, 202) else f"http-{status_code}")
 
     update_lead(lead_id, {
-        "status": "sent_for_contact",
         "last_call_status": "queued",
         "sent_for_contact_at": datetime.utcnow().isoformat(),
         "next_call_at": None

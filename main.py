@@ -50,6 +50,9 @@ from credits import (
     bill_call_completion,
 )
 
+# Stripe credit top-up system
+from stripe_credits import router as stripe_router
+
 # ---- Google libs ----
 try:
     from google.oauth2.credentials import Credentials as GCredentials
@@ -126,6 +129,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
+
+# Attach Stripe router
+app.include_router(stripe_router)
 
 def _get_request_user_id(req: Request) -> Optional[str]:
     hdr = req.headers.get("X-User-Id")

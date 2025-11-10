@@ -204,24 +204,72 @@ def _download_csv_from_sheet(sheet_url: str, gid_candidates=(0, 1837663021)) -> 
 _CAMPAIGN_RULES_AVAILABLE = True
 
 def get_campaign_rules(campaign_id: Optional[str]) -> Dict:
-    """
-    Returns a flat dict with keys used by call/email code:
-      send_email, send_calls, call_window_start, call_window_end,
-      max_attempts, retry_minutes, email (nested dict: send_initial)
-    Accepts either our flat shape OR a nested {use_email,use_calls, call:{...}} from DB.
-    """
+    # sane defaults if nothing is set in DB
     rules = {
         "send_email": True,
         "send_calls": True,
-        "call_window_start": CALL_WINDOW_START,
-        "call_window_end": CALL_WINDOW_END,
+        "call_window_start": CALL_WINDOW_START,  # your global default (currently 9)
+        "call_window_end":   CALL_WINDOW_END,    # your global default (currently 18)
         "max_attempts": MAX_RETRIES,
         "retry_minutes": RETRY_MINUTES,
         "email": {"send_initial": True},
     }
-    global _CAMPAIGN_RULES_AVAILABLE
-    if not campaign_id or not _CAMPAIGN_RULES_AVAILABLE:
+
+    if not campaign_id:
         return rules
+
+    try:
+        r = (
+            supabase.table("campaigns")
+            .select("delivery_rules")
+            .eq("id", campaign_id)
+            .single()
+            .execute()
+        )
+        data = getattr(r, "data", None) or {}
+        dr = data.get("delivery_rules") or {}
+        if not isinstance(dr, dict):
+            print(f"[RULES] campaign={campaign_id} has no delivery_rules dict; using defaults")
+            return rules
+
+        # top-level toggles (backwards-compatible keys)
+        if "send_email" in dr: rules["send_email"] = bool(dr["send_email"])
+        if "send_calls" in dr: rules["send_calls"] = bool(dr["send_calls"])
+        if "use_email"  in dr: rules["send_email"] = bool(dr["use_email"])
+        if "use_calls"  in dr: rules["send_calls"] = bool(dr["use_calls"])
+
+        # call rules may be nested under "call" or flat in delivery_rules
+        call_dr = dr.get("call") if isinstance(dr.get("call"), dict) else dr
+
+        # window start/end
+        start = int(call_dr.get("window_start", rules["call_window_start"]))
+        end   = int(call_dr.get("window_end",   rules["call_window_end"]))
+
+        # Normalize: backend uses start <= hour < end. If UI uses 0–23 for "all day",
+        # make end=24 so hour 23 is included.
+        if end == 23:
+            end = 24
+
+        # Clamp to valid hours
+        rules["call_window_start"] = max(0, min(23, start))
+        rules["call_window_end"]   = max(1, min(24, end))
+
+        # Other call knobs
+        if "max_attempts" in call_dr: rules["max_attempts"] = int(call_dr["max_attempts"])
+        if "retry_minutes" in call_dr: rules["retry_minutes"] = int(call_dr["retry_minutes"])
+
+        # email knobs
+        email_dr = dr.get("email")
+        if isinstance(email_dr, dict) and "send_initial" in email_dr:
+            rules["email"]["send_initial"] = bool(email_dr["send_initial"])
+
+        print(f"[RULES] campaign={campaign_id} loaded "
+              f"start={rules['call_window_start']} end={rules['call_window_end']} "
+              f"send_calls={rules['send_calls']} max_attempts={rules['max_attempts']} retry={rules['retry_minutes']}")
+    except Exception as e:
+        print(f"[RULES] lookup failed for campaign={campaign_id}: {e}; using defaults")
+
+    return rules
 
     try:
         r = supabase.table("campaigns").select("delivery_rules").eq("id", campaign_id).single().execute()

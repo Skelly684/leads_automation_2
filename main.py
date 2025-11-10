@@ -467,13 +467,31 @@ name=<Full Name>; company=<Company>; intent=<positive|neutral|negative>; action=
 # ===================================================
 # Helpers: Supabase writes (calls)
 # ===================================================
-def log_call_to_supabase(lead_id, call_status, notes=""):
+
+def _get_lead_user_id(lead_id: str) -> str:
+    """
+    Best-effort fetch of user_id for a given lead_id so we can satisfy NOT NULL on call_logs.user_id.
+    """
+    try:
+        resp = supabase.table("leads").select("user_id").eq("id", lead_id).single().execute()
+        row = getattr(resp, "data", None) or {}
+        uid = row.get("user_id")
+        if isinstance(uid, str) and uid.strip():
+            return uid.strip()
+    except Exception as e:
+        print("[CALL_LOG] failed to fetch lead.user_id:", e)
+    return None
+def log_call_to_supabase(lead_id: str, call_status: str, notes: str = "", external_call_id: str = None, provider: str = VOICE_PROVIDER_NAME, user_id: str = None):
+    # Ensure we have a user_id for call_logs (NOT NULL)
+    if not user_id:
+        user_id = _get_lead_user_id(lead_id)
     if not lead_id:
         print(f"[WARN] Skipping call log (missing lead_id). status={call_status} notes={notes[:120]}")
         return
     try:
         supabase.table("call_logs").insert({
             "lead_id": lead_id,
+            "user_id": user_id,
             "call_status": call_status,
             "notes": (notes or "")[:1000],
         }).execute()
@@ -2543,8 +2561,12 @@ async def vapi_webhook(request: Request):
 
     # Lightweight observability row so activity appears on the dashboard immediately
     if lead_id:
+    # Resolve user_id for lightweight event insert
+    _uid_for_calllog = _get_lead_user_id(lead_id)
         try:
             supabase.table("call_logs").insert({
+                "user_id": _uid_for_calllog,
+
                 "lead_id": lead_id,
                 "call_status": (status or "event"),
                 "provider": VOICE_PROVIDER_NAME,

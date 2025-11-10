@@ -247,8 +247,8 @@ def get_campaign_rules(campaign_id: Optional[str]) -> Dict:
     rules = {
         "send_email": True,
         "send_calls": True,
-        "call_window_start": CALL_WINDOW_START,  # your global default (currently 9)
-        "call_window_end":   CALL_WINDOW_END,    # your global default (currently 18)
+        "call_window_start": CALL_WINDOW_START,  # e.g. 9
+        "call_window_end":   CALL_WINDOW_END,    # e.g. 18
         "max_attempts": MAX_RETRIES,
         "retry_minutes": RETRY_MINUTES,
         "email": {"send_initial": True},
@@ -280,25 +280,39 @@ def get_campaign_rules(campaign_id: Optional[str]) -> Dict:
         # call rules may be nested under "call" or flat in delivery_rules
         call_dr = dr.get("call") if isinstance(dr.get("call"), dict) else dr
 
-        # window start/end
-        start = int(call_dr.get("window_start", rules["call_window_start"]))
-        end   = int(call_dr.get("window_end",   rules["call_window_end"]))
+        # read raw values (can be "00:00", "00:00:00", etc.)
+        start_raw = call_dr.get("window_start", rules["call_window_start"])
+        end_raw   = call_dr.get("window_end",   rules["call_window_end"])
 
-        # Normalize: backend uses start <= hour < end. If UI uses 0–23 for "all day",
-        # make end=24 so hour 23 is included.
+        # parse safely
+        start = _to_hour(start_raw)
+        end   = _to_hour(end_raw)
+
+        # fallback to defaults if parsing failed
+        if start is None:
+            start = rules["call_window_start"]
+        if end is None:
+            end = rules["call_window_end"]
+
+        # normalize: we use start <= hour < end; map end=23 (or 23:59:59) to 24
         if end == 23:
             end = 24
 
-        # Clamp to valid hours
-        rules["call_window_start"] = max(0, min(23, start))
-        rules["call_window_end"]   = max(1, min(24, end))
+        # clamp to valid range
+        start = max(0, min(23, start))
+        end   = max(1, min(24, end))
 
-        # Other call knobs
-        if "max_attempts" in call_dr: rules["max_attempts"] = int(call_dr["max_attempts"])
-        if "retry_minutes" in call_dr: rules["retry_minutes"] = int(call_dr["retry_minutes"])
+        rules["call_window_start"] = start
+        rules["call_window_end"]   = end
 
-        # email knobs
-        email_dr = dr.get("email")
+        # other call knobs
+        if "max_attempts" in call_dr:
+            rules["max_attempts"] = int(call_dr["max_attempts"])
+        if "retry_minutes" in call_dr:
+            rules["retry_minutes"] = int(call_dr["retry_minutes"])
+
+        # nested email dict
+        email_dr = dr.get("email") or {}
         if isinstance(email_dr, dict) and "send_initial" in email_dr:
             rules["email"]["send_initial"] = bool(email_dr["send_initial"])
 
@@ -309,59 +323,6 @@ def get_campaign_rules(campaign_id: Optional[str]) -> Dict:
         print(f"[RULES] lookup failed for campaign={campaign_id}: {e}; using defaults")
 
     return rules
-
-    try:
-        r = supabase.table("campaigns").select("delivery_rules").eq("id", campaign_id).single().execute()
-        data = getattr(r, "data", None)
-        if not data:
-            return rules
-        dr = (data.get("delivery_rules") or {}) if isinstance(data.get("delivery_rules"), dict) else {}
-
-        # bool toggles (accept multiple spellings)
-        if "send_email" in dr: rules["send_email"] = bool(dr["send_email"])
-        if "send_calls" in dr: rules["send_calls"] = bool(dr["send_calls"])
-        if "use_email" in dr:  rules["send_email"] = bool(dr["use_email"])
-        if "use_calls" in dr:  rules["send_calls"] = bool(dr["use_calls"])
-
-        # nested call dict (accept flat or nested)
-        call_dr = dr.get("call") if isinstance(dr.get("call"), dict) else dr
-        
-        # read raw values (can be "00:00:00" etc.)
-        start_raw = call_dr.get("window_start", rules["call_window_start"])
-        end_raw   = call_dr.get("window_end",   rules["call_window_end"])
-        
-        # parse safely
-        start = _to_hour(start_raw)
-        end   = _to_hour(end_raw)
-        
-        # fallback to defaults if parsing failed
-        if start is None:
-            start = rules["call_window_start"]
-        if end is None:
-            end = rules["call_window_end"]
-        
-        # normalize: we use start <= hour < end; map end=23 (or 23:59:59) to 24
-        if end == 23:
-            end = 24
-        
-        # clamp to valid range
-        start = max(0, min(23, start))
-        end   = max(1, min(24, end))
-        
-        rules["call_window_start"] = start
-        rules["call_window_end"]   = end
-        
-        # other call knobs
-        if "max_attempts" in call_dr:
-            rules["max_attempts"] = int(call_dr["max_attempts"])
-        if "retry_minutes" in call_dr:
-            rules["retry_minutes"] = int(call_dr["retry_minutes"])
-        
-        # nested email dict
-        email_dr = dr.get("email") or {}
-        if isinstance(email_dr, dict) and "send_initial" in email_dr:
-            rules["email"]["send_initial"] = bool(email_dr["send_initial"])
-
 # ===================================================
 # Helpers: phone/timezone (for calls)
 # ===================================================

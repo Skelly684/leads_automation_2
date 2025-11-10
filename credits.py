@@ -55,6 +55,10 @@ def domain_balance_credits(supabase, domain: str) -> int:
     except Exception:
         return 0
 
+def domain_balance(supabase, domain: str) -> int:
+    # return balance in CREDITS to keep /api/credits simple
+    return domain_balance_credits(supabase, domain)
+
 def domain_add_credits(
     supabase,
     domain: str,

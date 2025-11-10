@@ -484,14 +484,14 @@ def _get_lead_user_id(lead_id: str) -> str:
 def log_call_to_supabase(lead_id: str, call_status: str, notes: str = "", external_call_id: str = None, provider: str = VOICE_PROVIDER_NAME, user_id: str = None):
     # Ensure we have a user_id for call_logs (NOT NULL)
     if not user_id:
-        user_id = _get_lead_user_id(lead_id)
+        user_id = _get_lead_user_id(lead_id) or DEFAULT_USER_ID   # <-- fallback
     if not lead_id:
         print(f"[WARN] Skipping call log (missing lead_id). status={call_status} notes={notes[:120]}")
         return
     try:
         supabase.table("call_logs").insert({
             "lead_id": lead_id,
-            "user_id": user_id,
+            "user_id": user_id,                 # <-- never None now
             "call_status": call_status,
             "notes": (notes or "")[:1000],
         }).execute()
@@ -500,7 +500,9 @@ def log_call_to_supabase(lead_id: str, call_status: str, notes: str = "", extern
 
 def log_call_enqueued_structured(lead_id: str, attempt_number: int, external_call_id: Optional[str]):
     try:
+        uid = _get_lead_user_id(lead_id) or DEFAULT_USER_ID
         supabase.table("call_logs").insert({
+            "user_id": uid,                      # <-- ensure NOT NULL
             "lead_id": lead_id,
             "call_status": "queued",
             "provider": VOICE_PROVIDER_NAME,
@@ -2561,12 +2563,10 @@ async def vapi_webhook(request: Request):
 
     # Lightweight observability row so activity appears on the dashboard immediately
     if lead_id:
-    # Resolve user_id for lightweight event insert
-    _uid_for_calllog = _get_lead_user_id(lead_id)
         try:
+            uid_for_log = _get_lead_user_id(lead_id) or DEFAULT_USER_ID  # <- ensure NOT NULL
             supabase.table("call_logs").insert({
-                "user_id": _uid_for_calllog,
-
+                "user_id": uid_for_log,
                 "lead_id": lead_id,
                 "call_status": (status or "event"),
                 "provider": VOICE_PROVIDER_NAME,
@@ -2664,6 +2664,18 @@ async def vapi_webhook(request: Request):
             )
 
     return JSONResponse({"ok": True}, status_code=200)
+
+def _get_lead_user_id(lead_id: str):
+    """Look up the lead's user_id (NOT NULL in call_logs)."""
+    if not lead_id:
+        return None
+    try:
+        r = supabase.table("leads").select("user_id").eq("id", lead_id).single().execute()
+        row = getattr(r, "data", None) or {}
+        return row.get("user_id")
+    except Exception as e:
+        print("[call_logs] failed to lookup user_id for lead:", lead_id, e)
+        return None
 
 # ===================================================
 # GOOGLE OAUTH 2.0 + CALENDAR

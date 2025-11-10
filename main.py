@@ -723,9 +723,7 @@ def make_vapi_call(phone, lead):
             "job_title": (lead.get("job_title") or ""),
             "jobTitle": (lead.get("job_title") or ""),
         },
-        "serverUrl": "https://leads-automation-2.onrender.com/vapi/webhook",
     }
-    
 
     headers = {"Authorization": f"Bearer {VAPI_API_KEY}", "Content-Type": "application/json"}
     resp = requests.post(url, json=payload, headers=headers)

@@ -68,7 +68,8 @@ VAPI_ASSISTANT_ID = os.getenv("VAPI_ASSISTANT_ID", "")
 VAPI_PHONE_NUMBER_ID = os.getenv("VAPI_PHONE_NUMBER_ID", "")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+# Prefer service role if present; fallback to SUPABASE_KEY for compatibility
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", os.getenv("SUPABASE_KEY", ""))
 DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID")
 
 CALL_WINDOW_START = 9
@@ -722,7 +723,9 @@ def make_vapi_call(phone, lead):
             "job_title": (lead.get("job_title") or ""),
             "jobTitle": (lead.get("job_title") or ""),
         },
+        "serverUrl": "https://<YOUR-RENDER-DOMAIN>.onrender.com/vapi/webhook",
     }
+    
 
     headers = {"Authorization": f"Bearer {VAPI_API_KEY}", "Content-Type": "application/json"}
     resp = requests.post(url, json=payload, headers=headers)

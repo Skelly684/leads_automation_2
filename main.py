@@ -1,43 +1,19 @@
-
-# Robust .env loader: load the .env next to this file even if uvicorn is started elsewhere
 import os
-from pathlib import Path
-from dotenv import load_dotenv, find_dotenv
-
-DOTENV_PATH = os.getenv("DOTENV_PATH") or (
-    Path(__file__).with_name(".env") if Path(__file__).with_name(".env").exists()
-    else find_dotenv(usecwd=True) or ".env"
-)
-load_dotenv(DOTENV_PATH)
-print(f"[ENV] Loaded: {DOTENV_PATH}")
-def _env(name: str, default: str = "") -> str:
-    # Strip whitespace and hidden CR that break URLs/keys
-    return (os.getenv(name, default) or "").strip().replace("\r", "")
-
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
-import requests
+import re
 import json
-from 
-def _log_call(user_id: str, lead_id: str, status: str, notes: str = "",
-              external_call_id: str = None, provider: str = VOICE_PROVIDER_NAME):
-    """
-    Safe call log writer that ALWAYS includes user_id (call_logs.user_id is NOT NULL).
-    """
-    try:
-        supabase.table("call_logs").insert({
-            "user_id": user_id,
-            "lead_id": lead_id,
-            "call_status": status,
-            "provider": provider,
-            "external_call_id": external_call_id,
-            "notes": (notes or "")[:500],
-        }).execute()
-    except Exception as e:
-        print("Call log insert failed:", e)
+import requests
+from uuid import uuid4
+from datetime import datetime, timedelta, timezone
+from typing import Optional, List, Tuple, Dict, Any
 
-supabase import create_client, Client
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Body
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.base import SchedulerAlreadyRunningError
+import json
+from supabase import create_client, Client
 from datetime import datetime, timedelta, timezone
 import pytz
 import phonenumbers
@@ -1711,7 +1687,7 @@ async def accept_and_call_leads(request: Request, background_tasks: BackgroundTa
             # hydrate phone back from DB if we still don't have one (unchanged)
             try:
                 db_row_res = (supabase.table("leads")
-                              .select("phone,contact_phone_numbers")
+                              .select("phone,contact_phone_numbers,company")
                               .eq("id", lead["id"]).single().execute())
                 db_lead = getattr(db_row_res, "data", None) or {}
                 if not lead.get("phone") and isinstance(db_lead.get("phone"), str) and db_lead["phone"].strip():
@@ -2560,32 +2536,16 @@ async def vapi_webhook(request: Request):
     summary = evt.get("summary") or (evt.get("message") or {}).get("summary") or ""
 
     # Lightweight observability row so activity appears on the dashboard immediately
-lead_user_id = None
-if lead_id:
-    try:
-        _row = (supabase.table("leads")
-                .select("user_id")
-                .eq("id", lead_id)
-                .single()
-                .execute())
-        lead_user_id = (getattr(_row, "data", None) or {}).get("user_id")
-    except Exception as e:
-        print("[Webhook] failed to fetch lead.user_id:", e)
-
-if lead_id:
-    try:
-        supabase.table("call_logs").insert({
-            "user_id": lead_user_id,
-            "lead_id": lead_id,
-            "call_status": (status or "event"),
-            "provider": VOICE_PROVIDER_NAME,
-            "external_call_id": external_call_id,
-            "notes": (summary or "")[:500],
-        }).execute()
-    except Exception as e:
-        print("Call log (event) insert failed:", e)
-
-
+    if lead_id:
+        try:
+            supabase.table("call_logs").insert({
+                "lead_id": lead_id,
+                "call_status": (status or "event"),
+                "provider": VOICE_PROVIDER_NAME,
+                "external_call_id": external_call_id,
+                "notes": (summary or "")[:500],
+            }).execute()
+        except Exception as e:
             print("Call log (event) insert failed:", e)
 
     # If we don't have a recognizable status yet, just ACK

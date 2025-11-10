@@ -11,3 +11,4 @@ google-api-python-client
 apify-client==1.7.1
 apify-client
 python-dotenv
+stripe==9.8.0

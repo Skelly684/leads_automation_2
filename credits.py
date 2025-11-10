@@ -2,7 +2,6 @@
 import os
 from typing import Optional, Dict, Any
 
-# Pricing (env overrides supported)
 PRICE_CENTS_PER_MINUTE = int(os.getenv("PRICE_CENTS_PER_MINUTE", "30"))  # $0.30/min
 MIN_RESERVE_CENTS = int(os.getenv("MIN_RESERVE_CENTS", "30"))            # require ≥ 1 min to start a call
 
@@ -11,7 +10,7 @@ def email_domain_of(supabase, user_id: Optional[str]) -> Optional[str]:
     if not user_id:
         return None
     try:
-        # Try profiles table first (adjust if you store elsewhere)
+        # Try profiles table first
         r = supabase.table("profiles").select("email").eq("id", user_id).single().execute()
         email = (getattr(r, "data", None) or {}).get("email")
         if not email:
@@ -27,33 +26,57 @@ def email_domain_of(supabase, user_id: Optional[str]) -> Optional[str]:
     except Exception:
         return None
 
+# ===== Use domain_credits instead of org_credits =====
 def domain_balance(supabase, domain: str) -> int:
     try:
-        r = supabase.table("org_credits").select("balance_cents").eq("domain", domain).single().execute()
+        r = supabase.table("domain_credits").select("balance_cents").eq("domain", domain).single().execute()
         row = getattr(r, "data", None)
-        return int(row.get("balance_cents")) if row else 0
+        return int((row or {}).get("balance_cents") or 0)
     except Exception:
         return 0
 
 def domain_add_credits(supabase, domain: str, amount_cents: int, reason: str = "topup", meta: Dict[str, Any] | None = None) -> int:
-    res = supabase.rpc("add_credits", {
-        "p_domain": domain,
-        "p_amount_cents": amount_cents,
-        "p_reason": reason,
-        "p_meta": meta or {}
-    }).execute()
-    data = getattr(res, "data", []) or [{"new_balance": 0}]
-    return int(data[0]["new_balance"])
+    # Upsert and add directly if you don't have RPCs
+    try:
+        # Ensure a row exists
+        supabase.table("domain_credits").upsert({"domain": domain, "balance_cents": 0}).execute()
+        # Atomically add (best-effort; if you have RPC use it instead)
+        cur = supabase.table("domain_credits").select("balance_cents").eq("domain", domain).single().execute().data or {}
+        new_bal = int(cur.get("balance_cents") or 0) + int(amount_cents)
+        supabase.table("domain_credits").update({"balance_cents": new_bal}).eq("domain", domain).execute()
+        # Optional: record a ledger entry if you have a table
+        try:
+            supabase.table("credits_ledger").insert({
+                "domain": domain,
+                "delta_cents": amount_cents,
+                "reason": reason,
+                "meta": meta or {}
+            }).execute()
+        except Exception:
+            pass
+        return new_bal
+    except Exception:
+        return domain_balance(supabase, domain)
 
 def domain_spend_credits(supabase, domain: str, amount_cents: int, reason: str = "call_charge", meta: Dict[str, Any] | None = None) -> int:
-    res = supabase.rpc("spend_credits", {
-        "p_domain": domain,
-        "p_amount_cents": amount_cents,
-        "p_reason": reason,
-        "p_meta": meta or {}
-    }).execute()
-    data = getattr(res, "data", []) or [{"new_balance": 0}]
-    return int(data[0]["new_balance"])
+    try:
+        cur = supabase.table("domain_credits").select("balance_cents").eq("domain", domain).single().execute().data or {}
+        bal = int(cur.get("balance_cents") or 0)
+        new_bal = max(0, bal - int(amount_cents))
+        supabase.table("domain_credits").update({"balance_cents": new_bal}).eq("domain", domain).execute()
+        # Optional: record a ledger entry
+        try:
+            supabase.table("credits_ledger").insert({
+                "domain": domain,
+                "delta_cents": -int(amount_cents),
+                "reason": reason,
+                "meta": meta or {}
+            }).execute()
+        except Exception:
+            pass
+        return new_bal
+    except Exception:
+        return domain_balance(supabase, domain)
 
 def ensure_credit_before_call(
     supabase,
@@ -68,7 +91,7 @@ def ensure_credit_before_call(
     user_id = lead.get("user_id")
     domain = email_domain_of(supabase, user_id)
     if not domain:
-        # If we can't resolve a domain, allow the call (or flip this to block)
+        # If we can't resolve a domain, allow the call (or flip this to block if you prefer)
         return True
     bal = domain_balance(supabase, domain)
     if bal < min_reserve_cents:
@@ -105,7 +128,6 @@ def bill_call_completion(
     dur = int(duration_seconds or 0)
     billed_minutes = max(1, (dur + 59) // 60)
     cost_cents = billed_minutes * int(price_cents_per_minute)
-
     if cost_cents <= 0:
         return
 

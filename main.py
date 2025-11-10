@@ -723,7 +723,7 @@ def make_vapi_call(phone, lead):
             "job_title": (lead.get("job_title") or ""),
             "jobTitle": (lead.get("job_title") or ""),
         },
-        "serverUrl": "https://<YOUR-RENDER-DOMAIN>.onrender.com/vapi/webhook",
+        "serverUrl": "https://leads-automation-2.onrender.com/vapi/webhook",
     }
     
 

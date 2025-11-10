@@ -1654,16 +1654,16 @@ async def accept_and_call_leads(request: Request, background_tasks: BackgroundTa
 
         # ---- Upsert (unique on user_id + email_address) ----
         try:
-            res = supabase.table("leads").upsert(lead, on_conflict="user_id,email_address").execute()
+            # 🚫 Do NOT send 'id' when upserting on (user_id,email_address)
+            upsert_payload = {k: v for k, v in lead.items() if k != "id"}
+        
+            res = (supabase.table("leads")
+                   .upsert(upsert_payload, on_conflict="user_id,email_address")
+                   .execute())
             saved_rows = getattr(res, "data", []) or []
-
+        
             if saved_rows:
                 saved = saved_rows[0]
-                lead["id"] = saved.get("id", lead["id"])
-                # if DB returned a different campaign (e.g., existing row), force it to the *new* one
-                if (saved.get("campaign_id") or "") != lead["campaign_id"]:
-                    update_lead(lead["id"], {"campaign_id": lead["campaign_id"]})
-                results.append({**saved, "campaign_id": lead["campaign_id"]})
             else:
                 # some PostgREST versions return no data on upsert; fetch explicitly
                 fetch = (supabase.table("leads")
@@ -1672,16 +1672,25 @@ async def accept_and_call_leads(request: Request, background_tasks: BackgroundTa
                          .eq("email_address", lead.get("email_address") or lead.get("email"))
                          .single().execute())
                 saved = getattr(fetch, "data", None) or {}
-                if saved:
-                    lead["id"] = saved.get("id", lead["id"])
-                    if (saved.get("campaign_id") or "") != lead["campaign_id"]:
-                        update_lead(lead["id"], {"campaign_id": lead["campaign_id"]})
-                    results.append({**saved, "campaign_id": lead["campaign_id"]})
-
+        
+            if saved:
+                # Always use DB’s id (keeps existing id stable when it was an update)
+                lead["id"] = saved.get("id", lead.get("id"))
+        
+                # if DB row had a different campaign, force it to the *new* one
+                if (saved.get("campaign_id") or "") != lead["campaign_id"]:
+                    update_lead(lead["id"], {"campaign_id": lead["campaign_id"]})
+        
+                results.append({**saved, "campaign_id": lead["campaign_id"]})
+            else:
+                print("[ACCEPT] Upsert did not return/fetch a row; skipping.")
+                continue
+        
             print(f"[ACCEPT] Saved/updated lead: {lead.get('first_name','')} {lead.get('last_name','')} (id: {lead.get('id')})")
             print(f"[ACCEPT] campaign_in_body={per_lead_campaign or req_campaign_id} final_campaign={lead.get('campaign_id')}")
             print(f"[ACCEPT][TRACE] id={lead.get('id')} email={lead.get('email_address')} campaign={lead.get('campaign_id')}")
-            # hydrate phone back from DB if we still don't have one (unchanged from your code)
+        
+            # hydrate phone back from DB if we still don't have one (unchanged)
             try:
                 db_row_res = (supabase.table("leads")
                               .select("phone,contact_phone_numbers,company")
@@ -1703,10 +1712,10 @@ async def accept_and_call_leads(request: Request, background_tasks: BackgroundTa
                 }, indent=2))
             except Exception as e:
                 print("[ACCEPT] DB hydrate failed (continuing):", e)
-
+        
         except Exception as e:
             msg = str(e)
-            # Duplicate -> reuse existing row and UPDATE campaign to the new one
+            # Duplicate -> reuse existing row and UPDATE campaign to the new one (never touch id)
             if "23505" in msg or "duplicate key value violates unique constraint" in msg:
                 try:
                     existing = (supabase.table("leads")
@@ -1716,14 +1725,12 @@ async def accept_and_call_leads(request: Request, background_tasks: BackgroundTa
                                 .single().execute()).data
                     if existing:
                         lead["id"] = existing["id"]
-                        # refresh sparse fields
                         patch = {}
                         for k in ["first_name", "last_name", "company_name", "job_title", "location",
                                   "city_name", "state_name", "country_name", "phone", "contact_phone_numbers"]:
                             v = lead.get(k)
                             if v and not existing.get(k):
                                 patch[k] = v
-                        # always move to the new campaign if different
                         if (existing.get("campaign_id") or "") != lead["campaign_id"]:
                             patch["campaign_id"] = lead["campaign_id"]
                         if patch:

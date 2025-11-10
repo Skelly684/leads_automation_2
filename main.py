@@ -491,9 +491,11 @@ def log_call_to_supabase(lead_id: str, call_status: str, notes: str = "", extern
     try:
         supabase.table("call_logs").insert({
             "lead_id": lead_id,
-            "user_id": user_id,                 # <-- never None now
+            "user_id": user_id,
             "call_status": call_status,
             "notes": (notes or "")[:1000],
+            "external_call_id": external_call_id,   # <-- ADD THIS
+            "provider": provider                    # (optional, if you store it)
         }).execute()
     except Exception as e:
         print("Call log insert failed:", e)
@@ -670,8 +672,9 @@ def make_vapi_call(phone, lead):
         external_call_id = j.get("id") or (j.get("call") or {}).get("id")
     except Exception:
         pass
-
-    return resp.status_code, (resp.text or "")
+    
+    # return the call id so we can store it in call_logs
+    return resp.status_code, external_call_id, (resp.text or "")
 
 def call_lead_if_possible(lead):
     lead_id = lead.get("id")
@@ -712,7 +715,13 @@ def call_lead_if_possible(lead):
         return
 
     attempt_num = int(lead.get("call_attempts") or 0) + 1
-    status_code, resp_text = make_vapi_call(phone, lead)
+    status_code, external_call_id, resp_text = make_vapi_call(phone, lead)
+    log_call_to_supabase(lead_id, "queued", "", external_call_id=external_call_id)
+    update_lead(lead_id, {
+        "last_call_status": "queued",
+        "sent_for_contact_at": datetime.utcnow().isoformat(),
+        "next_call_at": None
+    })
 
     external_call_id = None
     try:

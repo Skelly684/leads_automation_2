@@ -725,7 +725,6 @@ def call_lead_if_possible(lead):
     log_call_to_supabase(lead_id, "queued" if status_code in (200, 201, 202) else f"http-{status_code}")
 
     update_lead(lead_id, {
-        "status": "sent_for_contact",
         "last_call_status": "queued",
         "sent_for_contact_at": datetime.utcnow().isoformat(),
         "next_call_at": None

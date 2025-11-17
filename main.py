@@ -2220,34 +2220,50 @@ def poll_gmail_replies_for_user(user_id: str, to_domain_override: Optional[str] 
 
         print(f"[Gmail Poller] mid={mid} parsed lead_id={lead_id}")
 
-
         # Try to insert the reply log
         try:
-                   # Extract sender email
+            # Extract sender email
             sender_emails = _extract_emails(from_hdr) if from_hdr else []
             sender_email = sender_emails[0] if sender_emails else (from_hdr or "")
+
+            # Prepare a short snippet
             snippet_text = (snippet or "").strip()
             if len(snippet_text) > 200:
                 snippet_text = snippet_text[:197] + "..."
+
+            # Format notes exactly how the frontend expects:
+            # from=sender@example.com snippet=Short reply text
             notes_value = f"from={sender_email} snippet={snippet_text}"
+
             # Fetch user_id of lead (or fallback to current user_id)
             try:
-                lead_user_res = supabase.table("leads").select("user_id").eq("id", lead_id).single().execute()
+                lead_user_res = (
+                    supabase.table("leads")
+                    .select("user_id")
+                    .eq("id", lead_id)
+                    .single()
+                    .execute()
+                )
                 lead_user_id = (lead_user_res.data or {}).get("user_id")
             except Exception:
                 lead_user_id = None
+
             if not lead_user_id:
                 lead_user_id = user_id
+
             supabase.table("email_logs").insert({
                 "user_id": lead_user_id,
                 "lead_id": lead_id,
-                "status": "reply",
+                "status": "reply",          # what the frontend filters on
+                "direction": "inbound",      # 🔥 IMPORTANT: satisfies email_logs_status_check
+                "provider": "gmail_inbox",   # consistent with Lovable's inbound provider
                 "subject": subject or "",
-                "notes": notes_value,
+                "notes": notes_value,        # from=... snippet=...
                 "body": snippet_text,
                 "to_email": to_hdr,
-                "idem_key": f"gmail:{mid}",
+                "idem_key": f"gmail:{mid}",  # dedupe key
             }).execute()
+
             print(f"[Gmail Poller] inserted reply mid={mid} lead_id={lead_id}")
         except Exception as e:
             print("[Gmail Poller] email_logs insert failed:", e)

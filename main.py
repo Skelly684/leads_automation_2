@@ -2671,13 +2671,13 @@ async def vapi_webhook(request: Request):
 
     # Extract identifiers and a (possibly non-terminal) status
     external_call_id, lead_id = _extract_ids(evt)
-    status = _extract_status(evt)  # may be a mid-call status like 'ringing' / 'in-progress'
+    status = _extract_status(evt)  # may be mid-call like 'ringing'
     summary = evt.get("summary") or (evt.get("message") or {}).get("summary") or ""
 
-    # Lightweight observability row so activity appears on the dashboard immediately
+    # Lightweight observability row
     if lead_id:
         try:
-            uid_for_log = _get_lead_user_id(lead_id) or DEFAULT_USER_ID  # <- ensure NOT NULL
+            uid_for_log = _get_lead_user_id(lead_id) or DEFAULT_USER_ID
             supabase.table("call_logs").insert({
                 "user_id": uid_for_log,
                 "lead_id": lead_id,
@@ -2689,19 +2689,18 @@ async def vapi_webhook(request: Request):
         except Exception as e:
             print("Call log (event) insert failed:", e)
 
-    # If we don't have a recognizable status yet, just ACK
+    # If no status → ack
     if not status:
         return JSONResponse({"ok": True}, status_code=200)
 
-    # From this point, only do the heavy updates for terminal statuses
+    # Only heavy updates for terminal statuses
     if status not in TERMINAL_STATUSES:
         return JSONResponse({"ok": True}, status_code=200)
 
-    # ----- existing terminal processing (kept as-is) -----
     if not lead_id:
         return JSONResponse({"ok": True}, status_code=200)
 
-    # Try to parse name/company out of the provider's summary (if present)
+    # Parse name/company from summary
     try:
         parts = [p.strip() for p in summary.split(";") if "=" in p]
         kv = {}
@@ -2717,51 +2716,78 @@ async def vapi_webhook(request: Request):
     meta = call_obj.get("metadata") or {}
 
     started_at = call_obj.get("startedAt") or call_obj.get("startTime") or meta.get("started_at")
-    ended_at   = call_obj.get("endedAt")   or call_obj.get("endTime")   or meta.get("ended_at")
-    duration_seconds = (call_obj.get("durationSeconds") or call_obj.get("duration") or meta.get("duration_seconds"))
-    recording_url = (call_obj.get("recordingUrl") or meta.get("recording_url") or meta.get("recordingUrl"))
+    ended_at = call_obj.get("endedAt") or call_obj.get("endTime") or meta.get("ended_at")
+    duration_seconds = call_obj.get("durationSeconds") or call_obj.get("duration") or meta.get("duration_seconds")
+    recording_url = call_obj.get("recordingUrl") or meta.get("recording_url") or meta.get("recordingUrl")
 
     patch = {
         "call_status": status,
         "provider": VOICE_PROVIDER_NAME,
     }
-    if started_at:        patch["started_at"] = started_at
-    if ended_at:          patch["ended_at"] = ended_at
-    if duration_seconds:  patch["duration_seconds"] = duration_seconds
-    if recording_url:     patch["recording_url"] = recording_url
+    if started_at:
+        patch["started_at"] = started_at
+    if ended_at:
+        patch["ended_at"] = ended_at
+    if duration_seconds:
+        patch["duration_seconds"] = duration_seconds
+    if recording_url:
+        patch["recording_url"] = recording_url
 
     update_structured_call_log(lead_id, external_call_id, patch)
-    log_call_to_supabase(lead_id, status, (summary or f"external_call_id={external_call_id}" or "").strip())
+    log_call_to_supabase(
+        lead_id,
+        status,
+        (summary or f"external_call_id={external_call_id}" or "").strip()
+    )
     print(f"[Webhook] {status} for lead {lead_id}")
 
+    # ================================
+    #      FIXED "completed" block
+    # ================================
     if status == "completed":
-     lead_patch = {
-        "status": "contacted",
-        "last_call_status": "answered",
-        "next_call_at": None,
-    
+        # Build lead patch for a completed (answered) call
+        lead_patch = {
+            "status": "contacted",
+            "last_call_status": "answered",
+            "next_call_at": None,
+        }
+
+        # Enrich lead with name/company if present
         if name_from_call:
             lead_patch["name"] = name_from_call
             lead_patch["first_name"] = name_from_call.split()[0].strip()
         if company_from_call:
             lead_patch["company_name"] = company_from_call
-        update_lead(lead_id, lead_patch)
-                # BILL the call based on durationSeconds (rounded up to minutes)
+
+        # Update the lead
+        try:
+            update_lead(lead_id, lead_patch)
+        except Exception as e:
+            print("[VAPI][WEBHOOK] lead update failed:", e)
+
+        # BILL call
         try:
             dur = 0
             try:
                 dur = int(duration_seconds) if duration_seconds is not None else 0
             except Exception:
                 dur = 0
+
             bill_call_completion(
                 supabase=supabase,
                 lead_id=lead_id,
                 external_call_id=external_call_id,
-                duration_seconds=dur
+                duration_seconds=dur,
             )
         except Exception as bill_e:
             print("[CREDITS] billing error:", bill_e)
 
+    # ================================
+    #          FAILED CALLS
+    # ================================
+    elif status in ("failed",):
+        update_lead(lead_id, {"last_call_status": status, "next_call_at": None})
+                
     elif status in ("failed",):
         update_lead(lead_id, {"last_call_status": status, "next_call_at": None})
 

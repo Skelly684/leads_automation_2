@@ -2256,7 +2256,7 @@ def poll_gmail_replies_for_user(user_id: str, to_domain_override: Optional[str] 
                 "lead_id": lead_id,
                 "status": "reply",          # what the frontend filters on
                 "direction": "inbound",      # 🔥 IMPORTANT: satisfies email_logs_status_check
-                "provider": "gmail_inbox",   # consistent with Lovable's inbound provider
+                "provider": "gmail",   # consistent with Lovable's inbound provider
                 "subject": subject or "",
                 "notes": notes_value,        # from=... snippet=...
                 "body": snippet_text,
@@ -2272,7 +2272,7 @@ def poll_gmail_replies_for_user(user_id: str, to_domain_override: Optional[str] 
         try:
             update_lead(lead_id, {
                 "status": "replied",
-                "last_email_status": "reply",
+                "last_email_status": "replied",
                 "last_reply_at": datetime.utcnow().isoformat(),
                 "last_reply_from": from_hdr,
                 "last_reply_subject": subject or "",

@@ -2223,17 +2223,31 @@ def poll_gmail_replies_for_user(user_id: str, to_domain_override: Optional[str] 
 
         # Try to insert the reply log
         try:
-            supabase.table("email_logs").insert({
-                "lead_id": lead_id,
-                "to_email": to_hdr,
-                "status": "reply",
-                "provider": "gmail_inbox",
-                "error": "",
-                "notes": f"from={from_hdr}; subject={subject}; snippet={snippet[:500]}",
-                "idem_key": f"gmail:{mid}",
-                "subject": subject or "",
-                "body": snippet[:500] if snippet else "",
-            }).execute()
+               # Extract sender email
+        sender_emails = _extract_emails(from_hdr) if from_hdr else []
+        sender_email = sender_emails[0] if sender_emails else (from_hdr or "")
+        snippet_text = (snippet or "").strip()
+        if len(snippet_text) > 200:
+            snippet_text = snippet_text[:197] + "..."
+        notes_value = f"from={sender_email} snippet={snippet_text}"
+        # Fetch user_id of lead (or fallback to current user_id)
+        try:
+            lead_user_res = supabase.table("leads").select("user_id").eq("id", lead_id).single().execute()
+            lead_user_id = (lead_user_res.data or {}).get("user_id")
+        except Exception:
+            lead_user_id = None
+        if not lead_user_id:
+            lead_user_id = user_id
+        supabase.table("email_logs").insert({
+            "user_id": lead_user_id,
+            "lead_id": lead_id,
+            "status": "reply",
+            "subject": subject or "",
+            "notes": notes_value,
+            "body": snippet_text,
+            "to_email": to_hdr,
+            "idem_key": f"gmail:{mid}",
+        }).execute()
             print(f"[Gmail Poller] inserted reply mid={mid} lead_id={lead_id}")
         except Exception as e:
             print("[Gmail Poller] email_logs insert failed:", e)
@@ -2721,11 +2735,11 @@ async def vapi_webhook(request: Request):
     print(f"[Webhook] {status} for lead {lead_id}")
 
     if status == "completed":
-        lead_patch = {
-            "status": "contacted",
-            "last_call_status": status,
-            "next_call_at": None,
-        }
+     lead_patch = {
+        "status": "contacted",
+        "last_call_status": "answered",
+        "next_call_at": None,
+    
         if name_from_call:
             lead_patch["name"] = name_from_call
             lead_patch["first_name"] = name_from_call.split()[0].strip()

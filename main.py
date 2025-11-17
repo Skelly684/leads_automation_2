@@ -2223,31 +2223,31 @@ def poll_gmail_replies_for_user(user_id: str, to_domain_override: Optional[str] 
 
         # Try to insert the reply log
         try:
-               # Extract sender email
-        sender_emails = _extract_emails(from_hdr) if from_hdr else []
-        sender_email = sender_emails[0] if sender_emails else (from_hdr or "")
-        snippet_text = (snippet or "").strip()
-        if len(snippet_text) > 200:
-            snippet_text = snippet_text[:197] + "..."
-        notes_value = f"from={sender_email} snippet={snippet_text}"
-        # Fetch user_id of lead (or fallback to current user_id)
-        try:
-            lead_user_res = supabase.table("leads").select("user_id").eq("id", lead_id).single().execute()
-            lead_user_id = (lead_user_res.data or {}).get("user_id")
-        except Exception:
-            lead_user_id = None
-        if not lead_user_id:
-            lead_user_id = user_id
-        supabase.table("email_logs").insert({
-            "user_id": lead_user_id,
-            "lead_id": lead_id,
-            "status": "reply",
-            "subject": subject or "",
-            "notes": notes_value,
-            "body": snippet_text,
-            "to_email": to_hdr,
-            "idem_key": f"gmail:{mid}",
-        }).execute()
+                   # Extract sender email
+            sender_emails = _extract_emails(from_hdr) if from_hdr else []
+            sender_email = sender_emails[0] if sender_emails else (from_hdr or "")
+            snippet_text = (snippet or "").strip()
+            if len(snippet_text) > 200:
+                snippet_text = snippet_text[:197] + "..."
+            notes_value = f"from={sender_email} snippet={snippet_text}"
+            # Fetch user_id of lead (or fallback to current user_id)
+            try:
+                lead_user_res = supabase.table("leads").select("user_id").eq("id", lead_id).single().execute()
+                lead_user_id = (lead_user_res.data or {}).get("user_id")
+            except Exception:
+                lead_user_id = None
+            if not lead_user_id:
+                lead_user_id = user_id
+            supabase.table("email_logs").insert({
+                "user_id": lead_user_id,
+                "lead_id": lead_id,
+                "status": "reply",
+                "subject": subject or "",
+                "notes": notes_value,
+                "body": snippet_text,
+                "to_email": to_hdr,
+                "idem_key": f"gmail:{mid}",
+            }).execute()
             print(f"[Gmail Poller] inserted reply mid={mid} lead_id={lead_id}")
         except Exception as e:
             print("[Gmail Poller] email_logs insert failed:", e)

@@ -2270,14 +2270,21 @@ def poll_gmail_replies_for_user(user_id: str, to_domain_override: Optional[str] 
 
         # Update lead status → replied + snapshot and stop follow-ups
         try:
+            now_iso = datetime.utcnow().isoformat()
+
             update_lead(lead_id, {
+                # Match Lovable's process-email-replies exactly
                 "status": "replied",
-                "last_email_status": "replied",
-                "last_reply_at": datetime.utcnow().isoformat(),
-                "last_reply_from": from_hdr,
-                "last_reply_subject": subject or "",
+                "last_reply_from": from_hdr,                # or parsed sender if you prefer
+                "last_reply_subject": subject or "No Subject",
                 "last_reply_snippet": (snippet or "")[:500],
+                "last_reply_at": now_iso,
+                "last_email_reply_at": now_iso,
+                "last_email_status": "replied",
+                # IMPORTANT: do NOT touch any call-related fields here
+                # (no last_call_status, next_call_at, call_attempts, etc.)
             })
+
             stop_sequence_for_lead(lead_id, reason="reply")
             print(f"[Gmail Poller] marked replied & stopped sequence lead_id={lead_id}")
         except Exception as e:

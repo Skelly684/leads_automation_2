@@ -2191,10 +2191,35 @@ def poll_gmail_replies_for_user(user_id: str, to_domain_override: Optional[str] 
             continue
 
         # Parse lead_id from plus-addressing (scott+<LEAD_ID>@domain)
+                # Parse lead_id from plus-addressing (e.g. scott+<LEAD_ID>@domain)
         lead_id = parse_lead_id_from_addresses(_extract_emails(to_hdr))
-        print(f"[Gmail Poller] mid={mid} parsed lead_id={lead_id}")
+
+        # Fallback: if no lead_id via plus-addressing, match by sender email
         if not lead_id:
+            from_emails = _extract_emails(from_hdr)
+            if from_emails:
+                normalized_from = from_emails[0].lower().strip()
+                try:
+                    db_row_res = (
+                        supabase.table("leads")
+                        .select("id")
+                        .eq("user_id", user_id)
+                        .eq("email_address", normalized_from)
+                        .single()
+                        .execute()
+                    )
+                    db_lead = getattr(db_row_res, "data", None)
+                    if db_lead:
+                        lead_id = db_lead.get("id")
+                except Exception as e:
+                    print(f"[Gmail Poller] fallback search failed: {e}")
+
+        if not lead_id:
+            # No lead found even after fallback; skip this message
             continue
+
+        print(f"[Gmail Poller] mid={mid} parsed lead_id={lead_id}")
+
 
         # Try to insert the reply log
         try:
